@@ -1,0 +1,3 @@
+produces	0
+operates_in	1
+supplies	2
