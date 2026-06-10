@@ -8,6 +8,9 @@ Source TSV columns (12):
     triplet_id, entity, entity_type, relationship, target, target_type,
     start_date, end_date, ticker, year, source_file, chunk_id
 
+Time is taken from `start_date` at month granularity ('YYYY-MM'); rows whose
+start_date is a placeholder fall back to the `year` column ('YYYY-00').
+
 Output (under ./data/FinReflectKG_TTransE/):
     train2id.txt   - head_id <tab> rel_id <tab> tail_id <tab> time_id
     valid2id.txt
@@ -29,7 +32,47 @@ import argparse
 import csv
 import os
 import random
+import re
 from collections import OrderedDict
+
+
+_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+
+def parse_month_year(s):
+    """Parse a 'Month YYYY' string (e.g. 'January 2020') into 'YYYY-MM'.
+
+    Returns None when no month name + 4-digit year can be found (e.g. the
+    'default_start_timestamp' placeholder rows). The caller falls back to the
+    `year` column in that case.
+    """
+    if not s:
+        return None
+    low = s.lower()
+    month = None
+    for name, idx in _MONTHS.items():
+        if name in low:
+            month = idx
+            break
+    if month is None:
+        return None
+    y = re.search(r"(\d{4})", s)
+    if not y:
+        return None
+    return f"{int(y.group(1))}-{month:02d}"
+
+
+def time_sort_key(token):
+    """Order time tokens chronologically: 'YYYY-MM' and fallback 'YYYY-00'.
+
+    'YYYY-00' (year-only fallback) sorts just before that year's January.
+    """
+    year, month = token.split("-")
+    return (int(year), int(month))
 
 
 def load_tsv(path):
@@ -83,18 +126,27 @@ def main():
     # subject: lower-cased ticker / org code (column `entity`)
     # relation: column `relationship`
     # object:   column `target`
-    # time:     column `year` (we discretise to one slot per year)
+    # time:     `start_date` discretised to month granularity -> 'YYYY-MM'.
+    #           When start_date is a placeholder (e.g. 'default_start_timestamp')
+    #           we fall back to the `year` column as a year-only 'YYYY-00' slot.
     quads_str = []
+    n_fallback = 0
     for r in rows:
         h = r["entity"].strip().lower()
         rel = r["relationship"].strip().lower()
         t = r["target"].strip().lower()
-        ts = r["year"].strip()
+        ts = parse_month_year(r["start_date"])
+        if ts is None:                       # fallback to the `year` column
+            y = r["year"].strip()
+            ts = f"{y}-00" if y else None
+            if ts is not None:
+                n_fallback += 1
         if not (h and rel and t and ts):
             continue
         quads_str.append((h, rel, t, ts))
 
-    print(f"[clean] kept {len(quads_str)} non-empty quadruples")
+    print(f"[clean] kept {len(quads_str)} non-empty quadruples "
+          f"({n_fallback} used year-column fallback)")
 
     # --- build unified entity vocabulary (subject ∪ object) ---
     ent_iter = []
@@ -106,9 +158,10 @@ def main():
     rel_iter = [rel for _, rel, _, _ in quads_str]
     relation2id = build_vocab(rel_iter)
 
-    # Time: sort numerically so that consecutive years get consecutive ids
-    years_sorted = sorted({ts for _, _, _, ts in quads_str}, key=lambda x: int(x))
-    time2id = OrderedDict((y, i) for i, y in enumerate(years_sorted))
+    # Time: sort chronologically (year, month) so consecutive months get
+    # consecutive ids. Tokens are 'YYYY-MM' (or 'YYYY-00' year-only fallback).
+    times_sorted = sorted({ts for _, _, _, ts in quads_str}, key=time_sort_key)
+    time2id = OrderedDict((y, i) for i, y in enumerate(times_sorted))
 
     print(f"[vocab] |E|={len(entity2id)}  |R|={len(relation2id)}  |T|={len(time2id)}")
 
